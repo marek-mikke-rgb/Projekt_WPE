@@ -1,3 +1,9 @@
+Link do Copilot:
+
+https://copilot.microsoft.com/conversations/join/g28dJqsUuTCedF91xU5qS
+
+
+
 Instalacja na PC:
 
 python -m venv .venv
