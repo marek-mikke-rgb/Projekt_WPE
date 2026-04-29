@@ -1,4 +1,5 @@
 opencv-python
 numpy
 matplotlib
+scipy
 ultralytics
