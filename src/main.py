@@ -68,21 +68,40 @@ def main():
         fft_amp = np.abs(fft_vals)
         fft_amp = fft_amp / (fft_amp.max() + 1e-6)
 
+        freqs = np.fft.rfftfreq(len(profile), d=1.0)
+
+        # --- WIZUALIZACJA FFT ---
         fft_plot_w = 400
         fft_plot_h = 200
         fft_plot = np.zeros((fft_plot_h, fft_plot_w, 3), dtype=np.uint8)
 
-        freqs = np.linspace(0, 1, len(fft_amp))
-        fft_scaled = (fft_amp * (fft_plot_h - 1)).astype(int)
+        x_scaled = (freqs / freqs.max() * (fft_plot_w - 1)).astype(int)
+        y_scaled = (fft_amp * (fft_plot_h - 1)).astype(int)
 
-        for i in range(len(fft_scaled) - 1):
-            x1 = int(i / len(fft_scaled) * (fft_plot_w - 1))
-            x2 = int((i + 1) / len(fft_scaled) * (fft_plot_w - 1))
-            y1 = fft_plot_h - 1 - fft_scaled[i]
-            y2 = fft_plot_h - 1 - fft_scaled[i + 1]
-            cv2.line(fft_plot, (x1, y1), (x2, y2), (0, 255, 255), 1)
+        for i in range(len(x_scaled) - 1):
+            cv2.line(
+                fft_plot,
+                (x_scaled[i], fft_plot_h - 1 - y_scaled[i]),
+                (x_scaled[i + 1], fft_plot_h - 1 - y_scaled[i + 1]),
+                (0, 255, 255),
+                1
+            )
 
-        # --- NORMALIZACJA DO WYKRESU PROFILU ---
+        # --- siatka częstotliwości ---
+        for f in [0.0, 0.25, 0.5, 0.75, 1.0]:
+            xf = int(f * (fft_plot_w - 1))
+            cv2.line(fft_plot, (xf, 0), (xf, fft_plot_h), (50, 50, 50), 1)
+            cv2.putText(fft_plot, f"{f:.2f}", (xf + 2, 15),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
+
+        # --- siatka amplitudy ---
+        for a in [0.0, 0.5, 1.0]:
+            ya = int((1 - a) * (fft_plot_h - 1))
+            cv2.line(fft_plot, (0, ya), (fft_plot_w, ya), (50, 50, 50), 1)
+            cv2.putText(fft_plot, f"{a:.1f}", (5, ya - 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
+
+        # --- WIZUALIZACJA PROFILU ---
         plot_w = 400
         plot_h = h
         plot = np.zeros((plot_h, plot_w, 3), dtype=np.uint8)
@@ -100,7 +119,6 @@ def main():
         prof_scaled = prof_scaled.astype(int)
         fit_scaled = fit_scaled.astype(int)
 
-        # --- RYSOWANIE PROFILU I SINUSA ---
         for i in range(h - 1):
             cv2.line(plot,
                      (prof_scaled[i], i),
@@ -113,7 +131,6 @@ def main():
                          (fit_scaled[i + 1], i + 1),
                          (0, 255, 0), 1)
 
-        # --- RYSOWANIE SZCZYTÓW NA WYKRESIE ---
         for p in peaks:
             cv2.circle(plot, (prof_scaled[p], p), 5, (0, 0, 255), -1)
 
