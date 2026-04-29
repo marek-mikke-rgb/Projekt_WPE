@@ -1,4 +1,4 @@
-            Instalacja na PC:
+Instalacja na PC:
 
 python -m venv .venv
 source .venv/bin/activate   # Linux/macOS
