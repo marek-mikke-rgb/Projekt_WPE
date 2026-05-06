@@ -2,6 +2,7 @@ import cv2
 import numpy as np
 from scipy.signal import find_peaks
 from scipy.optimize import curve_fit
+from collections import deque
 
 
 def sine_func(x, A, w, phi, C):
@@ -13,17 +14,25 @@ def nothing(x):
 
 
 def main():
-    cap = cv2.VideoCapture(0)
+    cap = cv2.VideoCapture("big_dark_straight_wave.mp4")
 
     # --- OKNO I SLIDERY ---
     cv2.namedWindow("Edges")
     cv2.createTrackbar("T1", "Edges", 50, 500, nothing)
     cv2.createTrackbar("T2", "Edges", 150, 500, nothing)
 
+    # --- BUFORY I FILTRY CZASOWE ---
+    profile_buffer = deque(maxlen=30)   # uśrednianie profilu w czasie
+    fft_buffer = deque(maxlen=30)       # uśrednianie FFT
+    avg_dist_smooth = 0.0               # wygładzona średnia odległość
+    alpha = 0.9                         # im bliżej 1, tym wolniej reaguje
+
     while True:
         ret, frame = cap.read()
         if not ret:
-            break
+            # zapętlenie wideo
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            continue
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         blur = cv2.GaussianBlur(gray, (7, 7), 0)
@@ -37,14 +46,20 @@ def main():
         # --- PROFIL PIONOWY ---
         h, w = edges.shape
         x_line = w // 2
-        profile = edges[:, x_line].astype(float)
+        raw_profile = edges[:, x_line].astype(float)
+
+        # --- BUFORY I UŚREDNIANIE PROFILU ---
+        profile_buffer.append(raw_profile)
+        profile = np.mean(profile_buffer, axis=0)
 
         # --- SZCZYTY ---
         peaks, _ = find_peaks(profile, height=50, distance=20)
 
         if len(peaks) > 1:
             distances = np.diff(peaks)
-            avg_distance = float(np.mean(distances))
+            avg_distance_raw = float(np.mean(distances))
+            avg_dist_smooth = alpha * avg_dist_smooth + (1 - alpha) * avg_distance_raw
+            avg_distance = avg_dist_smooth
         else:
             avg_distance = 0.0
 
@@ -62,11 +77,16 @@ def main():
 
         except Exception:
             fit_ok = False
+            fitted = np.zeros_like(profile)
 
         # --- FFT (widmo amplitudowe) ---
         fft_vals = np.fft.rfft(profile)
         fft_amp = np.abs(fft_vals)
-        fft_amp = fft_amp / (fft_amp.max() + 1e-6)
+        fft_amp /= (fft_amp.max() + 1e-6)
+
+        # uśrednianie FFT w czasie
+        fft_buffer.append(fft_amp)
+        fft_amp = np.mean(fft_buffer, axis=0)
 
         freqs = np.fft.rfftfreq(len(profile), d=1.0)
 

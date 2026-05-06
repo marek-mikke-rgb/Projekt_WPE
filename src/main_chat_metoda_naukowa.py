@@ -4,7 +4,6 @@ from scipy.signal import butter, filtfilt
 from dataclasses import dataclass
 from typing import Optional
 import numpy.fft as fft
-import math
 import time
 
 g = 9.81  # [m/s^2]
@@ -30,7 +29,6 @@ class WaveParameters:
 
 
 def get_example_calibration() -> CameraCalibration:
-    # Na razie: brak realnej kalibracji → H = I
     K = np.eye(3, dtype=np.float32)
     dist = np.zeros(5, dtype=np.float32)
     R = np.eye(3, dtype=np.float32)
@@ -40,29 +38,36 @@ def get_example_calibration() -> CameraCalibration:
 
 
 def warp_to_world_plane(frame: np.ndarray, calib: CameraCalibration, out_size=(400, 200)) -> np.ndarray:
-    # Zamiast prawdziwego rzutu: po prostu skalujemy obraz
-    frame_resized = cv2.resize(frame, out_size)
-    return frame_resized
+    return cv2.resize(frame, out_size)
 
+
+# ============================================================
+#   PIONOWY TIMESTACK (fale płyną z góry na dół)
+# ============================================================
 
 class TimeStackBuilder:
-    def __init__(self, max_frames: int, line_y: int):
+    def __init__(self, max_frames: int, line_x: int):
         self.max_frames = max_frames
-        self.line_y = line_y
+        self.line_x = line_x
         self.stack = None
 
     def add_frame(self, world_gray: np.ndarray):
-        row = world_gray[self.line_y, :].astype(np.float32)
+        col = world_gray[:, self.line_x].astype(np.float32)
+
         if self.stack is None:
-            self.stack = row[None, :]
+            self.stack = col[None, :]
         else:
-            self.stack = np.vstack([self.stack, row[None, :]])
+            self.stack = np.vstack([self.stack, col[None, :]])
             if self.stack.shape[0] > self.max_frames:
                 self.stack = self.stack[-self.max_frames:, :]
 
     def get_stack(self):
         return self.stack
 
+
+# ============================================================
+#   FILTRACJA
+# ============================================================
 
 def butter_bandpass(lowcut, highcut, fs, order=4):
     nyq = 0.5 * fs
@@ -85,6 +90,10 @@ def apply_temporal_filter(stack: np.ndarray, fps: float, lowcut=0.05, highcut=1.
         filtered[:, x] = filtfilt(b, a, col)
     return filtered
 
+
+# ============================================================
+#   WIDMO k–ω
+# ============================================================
 
 def compute_k_omega_spectrum(stack: np.ndarray, dx: float, dt: float):
     if stack is None:
@@ -128,20 +137,37 @@ def find_dominant_wave_from_spectrum(S: np.ndarray, k: np.ndarray, omega: np.nda
     wavelength = 2 * np.pi / abs(k_axis)
     c = abs(omega_axis / k_axis)
 
-    direction_deg = 0.0  # 1D timestack
-
     return WaveParameters(
         wavelength=wavelength,
         period=T,
         phase_speed=c,
-        direction_deg=direction_deg,
+        direction_deg=0.0,
         k=k_axis,
         omega=omega_axis
     )
 
 
+# ============================================================
+#   WYSOKOŚĆ FALI (szacowana)
+# ============================================================
+
+def estimate_wave_height_from_stack(stack: np.ndarray) -> float:
+    if stack is None:
+        return 0.0
+
+    signal = np.mean(stack, axis=1)
+    signal = signal - np.mean(signal)
+    rms = np.sqrt(np.mean(signal ** 2))
+
+    return rms * 0.05  # do kalibracji
+
+
+# ============================================================
+#   GŁÓWNY PROGRAM
+# ============================================================
+
 def main():
-    video_path = "waves_complex.mp4"
+    video_path = "test_wave_vertical.mp4"
     cap = cv2.VideoCapture(video_path)
 
     fps = cap.get(cv2.CAP_PROP_FPS)
@@ -151,19 +177,22 @@ def main():
 
     calib = get_example_calibration()
 
-    world_width_m = 10.0
     out_w = 400
     out_h = 200
-    dx = world_width_m / out_w
-    depth_h = 1.5
 
-    # linia w dolnej części obrazu (np. 70% wysokości) – tam będą fale
-    line_y = int(out_h * 0.7)
+    # --- KLUCZOWA ZMIANA ---
+    # 1 px = 1 m (w sensie analizy)
+    dx = 1.0
+
+    line_x = int(out_w * 0.5)
     max_frames_stack = 512
-    stack_builder = TimeStackBuilder(max_frames=max_frames_stack, line_y=line_y)
+    stack_builder = TimeStackBuilder(max_frames=max_frames_stack, line_x=line_x)
 
     last_estimate_time = 0
     estimate_interval = 2.0
+
+    wave_params = None
+    height_est = 0.0
 
     while True:
         ret, frame = cap.read()
@@ -172,35 +201,46 @@ def main():
             continue
 
         frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
         world = warp_to_world_plane(frame_gray, calib, out_size=(out_w, out_h))
 
         stack_builder.add_frame(world)
         stack = stack_builder.get_stack()
 
         now = time.time()
-        wave_params = None
 
         if stack is not None and (now - last_estimate_time) > estimate_interval:
             last_estimate_time = now
 
             filtered_stack = apply_temporal_filter(stack, fps=fps)
             S, k_axis, omega_axis = compute_k_omega_spectrum(filtered_stack, dx=dx, dt=dt)
-            wave_params = find_dominant_wave_from_spectrum(S, k_axis, omega_axis, depth=depth_h)
+            wave_params = find_dominant_wave_from_spectrum(S, k_axis, omega_axis, depth=1.0)
+            height_est = estimate_wave_height_from_stack(filtered_stack)
 
-        vis = cv2.cvtColor(world, cv2.COLOR_GRAY2BGR)
-        cv2.line(vis, (0, line_y), (out_w - 1, line_y), (0, 255, 0), 1)
+        # --- OKNO PARAMETRÓW ---
+        param_window = np.zeros((260, 350, 3), dtype=np.uint8)
+
+        def put(txt, y):
+            cv2.putText(param_window, txt, (10, y), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7, (0, 255, 255), 2)
 
         if wave_params is not None:
-            cv2.putText(vis, f"lambda: {wave_params.wavelength:.3f} m", (10, 20),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-            cv2.putText(vis, f"T: {wave_params.period:.3f} s", (10, 45),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-            cv2.putText(vis, f"c: {wave_params.phase_speed:.3f} m/s", (10, 70),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+            put(f"lambda: {wave_params.wavelength:.3f} px", 40)
+            put(f"T: {wave_params.period:.3f} s", 80)
+            put(f"c: {wave_params.phase_speed:.3f} px/s", 120)
+            put(f"k: {wave_params.k:.3f} 1/px", 160)
+            put(f"omega: {wave_params.omega:.3f} rad/s", 200)
 
+        if height_est > 0:
+            put(f"H~: {height_est:.3f} px", 240)
+
+        cv2.imshow("Wave Parameters", param_window)
+
+        # --- OBRAZ ---
+        vis = cv2.cvtColor(world, cv2.COLOR_GRAY2BGR)
+        cv2.line(vis, (line_x, 0), (line_x, out_h - 1), (0, 255, 0), 1)
         cv2.imshow("World (XY) + line", vis)
 
+        # --- TIMESTACK ---
         if stack is not None:
             st_vis = stack.copy()
             st_vis = st_vis - st_vis.min()
@@ -208,7 +248,7 @@ def main():
                 st_vis = st_vis / st_vis.max()
             st_vis = (st_vis * 255).astype(np.uint8)
             st_vis_color = cv2.applyColorMap(st_vis, cv2.COLORMAP_JET)
-            cv2.imshow("Timestack (t vs x)", st_vis_color)
+            cv2.imshow("Timestack (t vs y)", st_vis_color)
 
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
