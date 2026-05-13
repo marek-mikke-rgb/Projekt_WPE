@@ -1,183 +1,201 @@
 import cv2
 import numpy as np
-from scipy.signal import find_peaks
-from scipy.optimize import curve_fit
-from collections import deque
+from scipy.fft import fft, fftfreq
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 
 
-def sine_func(x, A, w, phi, C):
-    return A * np.sin(w * x + phi) + C
+class WaveAnalyzer:
+    def __init__(self, focal_length=3.04, pixel_size=0.00112, width=1920, height=1080, fps=30.0):
+        self.f0 = focal_length
+        self.d_u = pixel_size
+        self.d_v = pixel_size
+        self.u_h = width / 2.0
+        self.v_h = height / 2.0
+        self.fps = fps
 
+        self.sift = cv2.SIFT_create()
+        self.lk_params = dict(
+            winSize=(15, 15), maxLevel=3,
+            criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03)
+        )
+        self.color = np.random.randint(0, 255, (1000, 3))
 
-def nothing(x):
-    pass
+        # --- Bufor do analizy czasowej (FFT) ---
+        # Zwiększono do 10 sekund dla uśrednienia większej liczby próbek
+        self.max_history_frames = int(fps * 10)
+        self.brightness_history = []
+
+        # Zmienne do wykresu FFT
+        self.spectrum_x = []
+        self.spectrum_y = []
+
+        # Zmienne numeryczne
+        self.current_f = 0.0
+        self.current_T = 0.0
+        self.current_L = 0.0
+
+        # Inicjalizacja Matplotlib (bez interaktywnego okna)
+        self.fig, self.ax = plt.subplots(figsize=(4, 4.8), dpi=100)
+        self.canvas = FigureCanvas(self.fig)
+
+    def preprocess(self, frame):
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        return cv2.equalizeHist(gray)
+
+    def extract_initial_features(self, gray_frame):
+        keypoints = self.sift.detect(gray_frame, None)
+        if not keypoints:
+            return None
+        keypoints = sorted(keypoints, key=lambda x: -x.response)[:100]
+        return np.array([kp.pt for kp in keypoints], dtype=np.float32).reshape(-1, 1, 2)
+
+    def update_wave_parameters(self, gray_frame):
+        """Analiza jasności w czasie i FFT"""
+        h, w = gray_frame.shape
+        # Analiza jasności ze środkowego wycinka obrazu
+        center_patch = gray_frame[int(h * 0.4):int(h * 0.6), int(w * 0.4):int(w * 0.6)]
+        mean_brightness = np.mean(center_patch)
+
+        self.brightness_history.append(mean_brightness)
+
+        if len(self.brightness_history) > self.max_history_frames:
+            self.brightness_history.pop(0)
+
+        if len(self.brightness_history) == self.max_history_frames:
+            data = np.array(self.brightness_history)
+            data = data - np.mean(data)  # Normalizacja (odjęcie średniej DC)
+
+            yf = fft(data)
+            xf = fftfreq(self.max_history_frames, 1 / self.fps)
+
+            # Bierzemy tylko dodatnią połowę widma
+            positive_yf = np.abs(yf[1:self.max_history_frames // 2])
+            positive_xf = xf[1:self.max_history_frames // 2]
+
+            if len(positive_yf) > 0:
+                self.spectrum_x = positive_xf
+                self.spectrum_y = positive_yf
+
+                peak_idx = np.argmax(positive_yf)
+                f = positive_xf[peak_idx]
+
+                # Odfiltrowanie szumów i błędnych odczytów
+                if 0.2 < f < 10.0:
+                    self.current_f = f
+                    self.current_T = 1.0 / f
+                    self.current_L = (9.81 * (self.current_T ** 2)) / (2.0 * np.pi)
+
+    def get_spectrum_image(self):
+        """Renderuje aktualny wykres FFT w formie słupkowej"""
+        if len(self.spectrum_x) > 0:
+            self.ax.clear()  # Czyścimy wykres, by narysować klatkę na nowo
+
+            self.ax.set_title("Widmo Amplitudowe FFT")
+            self.ax.set_xlabel("Czestotliwosc [Hz]")
+            self.ax.set_ylabel("Amplituda")
+
+            # Obliczenie idealnej szerokości słupka dla aktualnej rozdzielczości FFT
+            bar_width = self.spectrum_x[1] - self.spectrum_x[0]
+
+            # Rysowanie wykresu słupkowego
+            self.ax.bar(self.spectrum_x, self.spectrum_y, width=bar_width * 0.8, color='dodgerblue')
+
+            # Skala automatyczna Y oraz stała skala X (typowa dla fal wodnych)
+            self.ax.set_xlim(0.1, 5.0)
+            self.ax.set_ylim(0, np.max(self.spectrum_y) * 1.1)
+
+            self.ax.grid(True, linestyle='--', alpha=0.5)
+
+        self.canvas.draw()
+        buf = self.canvas.buffer_rgba()
+        plot_img = np.asarray(buf)
+        plot_img = cv2.cvtColor(plot_img, cv2.COLOR_RGBA2BGR)
+        return plot_img
 
 
 def main():
-    cap = cv2.VideoCapture("big_dark_straight_wave.mp4")
+    fps_assumption = 30.0
+    analyzer = WaveAnalyzer(width=640, height=480, fps=fps_assumption)
+    cap = cv2.VideoCapture(0)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
-    # --- OKNO I SLIDERY ---
-    cv2.namedWindow("Edges")
-    cv2.createTrackbar("T1", "Edges", 50, 500, nothing)
-    cv2.createTrackbar("T2", "Edges", 150, 500, nothing)
+    ret, old_frame = cap.read()
+    if not ret:
+        return
 
-    # --- BUFORY I FILTRY CZASOWE ---
-    profile_buffer = deque(maxlen=30)   # uśrednianie profilu w czasie
-    fft_buffer = deque(maxlen=30)       # uśrednianie FFT
-    avg_dist_smooth = 0.0               # wygładzona średnia odległość
-    alpha = 0.9                         # im bliżej 1, tym wolniej reaguje
+    old_gray = analyzer.preprocess(old_frame)
+    p0 = analyzer.extract_initial_features(old_gray)
+    mask = np.zeros_like(old_frame)
 
     while True:
         ret, frame = cap.read()
         if not ret:
-            # zapętlenie wideo
-            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-            continue
-
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        blur = cv2.GaussianBlur(gray, (7, 7), 0)
-
-        # --- PROGI Z SLIDERÓW ---
-        t1 = cv2.getTrackbarPos("T1", "Edges")
-        t2 = cv2.getTrackbarPos("T2", "Edges")
-
-        edges = cv2.Canny(blur, t1, t2)
-
-        # --- PROFIL PIONOWY ---
-        h, w = edges.shape
-        x_line = w // 2
-        raw_profile = edges[:, x_line].astype(float)
-
-        # --- BUFORY I UŚREDNIANIE PROFILU ---
-        profile_buffer.append(raw_profile)
-        profile = np.mean(profile_buffer, axis=0)
-
-        # --- SZCZYTY ---
-        peaks, _ = find_peaks(profile, height=50, distance=20)
-
-        if len(peaks) > 1:
-            distances = np.diff(peaks)
-            avg_distance_raw = float(np.mean(distances))
-            avg_dist_smooth = alpha * avg_dist_smooth + (1 - alpha) * avg_distance_raw
-            avg_distance = avg_dist_smooth
-        else:
-            avg_distance = 0.0
-
-        # --- APROKSYMACJA SINUSEM ---
-        y = np.arange(len(profile))
-        fit_ok = True
-
-        try:
-            guess = [50, 0.05, 0, np.mean(profile)]
-            params, _ = curve_fit(sine_func, y, profile, p0=guess, maxfev=5000)
-            fitted = sine_func(y, *params)
-
-            if np.max(np.abs(fitted)) < 1e-6:
-                fit_ok = False
-
-        except Exception:
-            fit_ok = False
-            fitted = np.zeros_like(profile)
-
-        # --- FFT (widmo amplitudowe) ---
-        fft_vals = np.fft.rfft(profile)
-        fft_amp = np.abs(fft_vals)
-        fft_amp /= (fft_amp.max() + 1e-6)
-
-        # uśrednianie FFT w czasie
-        fft_buffer.append(fft_amp)
-        fft_amp = np.mean(fft_buffer, axis=0)
-
-        freqs = np.fft.rfftfreq(len(profile), d=1.0)
-
-        # --- WIZUALIZACJA FFT ---
-        fft_plot_w = 400
-        fft_plot_h = 200
-        fft_plot = np.zeros((fft_plot_h, fft_plot_w, 3), dtype=np.uint8)
-
-        x_scaled = (freqs / freqs.max() * (fft_plot_w - 1)).astype(int)
-        y_scaled = (fft_amp * (fft_plot_h - 1)).astype(int)
-
-        for i in range(len(x_scaled) - 1):
-            cv2.line(
-                fft_plot,
-                (x_scaled[i], fft_plot_h - 1 - y_scaled[i]),
-                (x_scaled[i + 1], fft_plot_h - 1 - y_scaled[i + 1]),
-                (0, 255, 255),
-                1
-            )
-
-        # --- siatka częstotliwości ---
-        for f in [0.0, 0.25, 0.5, 0.75, 1.0]:
-            xf = int(f * (fft_plot_w - 1))
-            cv2.line(fft_plot, (xf, 0), (xf, fft_plot_h), (50, 50, 50), 1)
-            cv2.putText(fft_plot, f"{f:.2f}", (xf + 2, 15),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
-
-        # --- siatka amplitudy ---
-        for a in [0.0, 0.5, 1.0]:
-            ya = int((1 - a) * (fft_plot_h - 1))
-            cv2.line(fft_plot, (0, ya), (fft_plot_w, ya), (50, 50, 50), 1)
-            cv2.putText(fft_plot, f"{a:.1f}", (5, ya - 5),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
-
-        # --- WIZUALIZACJA PROFILU ---
-        plot_w = 400
-        plot_h = h
-        plot = np.zeros((plot_h, plot_w, 3), dtype=np.uint8)
-
-        if profile.max() > 0:
-            prof_scaled = (profile / profile.max()) * (plot_w - 1)
-        else:
-            prof_scaled = np.zeros_like(profile)
-
-        if fit_ok and fitted.max() > 0:
-            fit_scaled = (fitted / fitted.max()) * (plot_w - 1)
-        else:
-            fit_scaled = np.zeros_like(profile)
-
-        prof_scaled = prof_scaled.astype(int)
-        fit_scaled = fit_scaled.astype(int)
-
-        for i in range(h - 1):
-            cv2.line(plot,
-                     (prof_scaled[i], i),
-                     (prof_scaled[i + 1], i + 1),
-                     (255, 255, 255), 1)
-
-            if fit_ok:
-                cv2.line(plot,
-                         (fit_scaled[i], i),
-                         (fit_scaled[i + 1], i + 1),
-                         (0, 255, 0), 1)
-
-        for p in peaks:
-            cv2.circle(plot, (prof_scaled[p], p), 5, (0, 0, 255), -1)
-
-        # --- RYSOWANIE SZCZYTÓW NA OBRAZIE ---
-        vis = frame.copy()
-        cv2.line(vis, (x_line, 0), (x_line, h), (0, 255, 0), 1)
-
-        for p in peaks:
-            cv2.circle(vis, (x_line, int(p)), 6, (0, 0, 255), -1)
-
-        cv2.putText(vis, f"Szczyty: {len(peaks)}", (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
-        cv2.putText(vis, f"Srednia odleglosc: {avg_distance:.1f}px", (10, 60),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
-
-        # --- WYŚWIETLANIE ---
-        cv2.imshow("Frame", vis)
-        cv2.imshow("Edges", edges)
-        cv2.imshow("Vertical Profile + Sine Fit", plot)
-        cv2.imshow("FFT Spectrum", fft_plot)
-
-        if cv2.waitKey(1) & 0xFF == ord('q'):
             break
+
+        frame_gray = analyzer.preprocess(frame)
+        analyzer.update_wave_parameters(frame_gray)
+
+        if p0 is not None and len(p0) > 0:
+            p1, st, err = cv2.calcOpticalFlowPyrLK(old_gray, frame_gray, p0, None, **analyzer.lk_params)
+
+            if p1 is not None:
+                good_new = p1[st == 1]
+                good_old = p0[st == 1]
+                total_distance = 0.0
+                valid_points = len(good_new)
+
+                for i, (new, old) in enumerate(zip(good_new, good_old)):
+                    a, b = new.ravel()
+                    c, d = old.ravel()
+                    total_distance += np.sqrt((a - c) ** 2 + (b - d) ** 2)
+                    mask = cv2.line(mask, (int(a), int(b)), (int(c), int(d)), analyzer.color[i % 1000].tolist(), 2)
+                    frame = cv2.circle(frame, (int(a), int(b)), 5, analyzer.color[i % 1000].tolist(), -1)
+
+                avg_pixel_speed = (total_distance / valid_points) if valid_points > 0 else 0
+                img = cv2.add(frame, mask)
+                speed_px_s = avg_pixel_speed * fps_assumption
+
+                # --- RAMKA Z WYNIKAMI ---
+                cv2.rectangle(img, (10, 10), (450, 150), (0, 0, 0), -1)
+
+                cv2.putText(img, f"Predkosc: {speed_px_s:.1f} px/s", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                            (0, 255, 0), 2)
+                cv2.putText(img, f"Szczytowa czestotliwosc: {analyzer.current_f:.2f} Hz", (20, 70),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                cv2.putText(img, f"Okres fali: {analyzer.current_T:.2f} s", (20, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                            (255, 255, 255), 2)
+                cv2.putText(img, f"Szacowana dlugosc: {analyzer.current_L:.2f} m", (20, 130), cv2.FONT_HERSHEY_SIMPLEX,
+                            0.6, (0, 255, 255), 2)
+
+                # --- GENEROWANIE I SKLEJANIE Z WYKRESEM FFT ---
+                plot_img = analyzer.get_spectrum_image()
+
+                # Zmiana rozmiaru wykresu, by pasował wysokością do okna kamery
+                plot_img = cv2.resize(plot_img, (400, 480))
+
+                # Połączenie obrazu wideo i wykresu
+                combined_view = np.hstack((img, plot_img))
+
+                old_gray = frame_gray.copy()
+                p0 = good_new.reshape(-1, 1, 2)
+
+                cv2.imshow('ZR_B: System Analizy Fal', combined_view)
+        else:
+            p0 = analyzer.extract_initial_features(frame_gray)
+            cv2.imshow('ZR_B: System Analizy Fal', frame)
+
+        key = cv2.waitKey(30) & 0xFF
+        if key == ord('q'):
+            break
+        elif key == ord('r'):
+            p0 = analyzer.extract_initial_features(frame_gray)
+            mask = np.zeros_like(old_frame)
 
     cap.release()
     cv2.destroyAllWindows()
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
