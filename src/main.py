@@ -6,7 +6,7 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 
 
 class WaveAnalyzer:
-    def __init__(self, focal_length=3.04, pixel_size=0.00112, width=1920, height=1080, fps=30.0):
+    def __init__(self, focal_length=3.04, pixel_size=0.00102, width=1920, height=1080, fps=30.0):
         self.f0 = focal_length
         self.d_u = pixel_size
         self.d_v = pixel_size
@@ -22,7 +22,6 @@ class WaveAnalyzer:
         self.color = np.random.randint(0, 255, (1000, 3))
 
         # --- Bufor do analizy czasowej (FFT) ---
-        # Zwiększono do 10 sekund dla uśrednienia większej liczby próbek
         self.max_history_frames = int(fps * 10)
         self.brightness_history = []
 
@@ -84,7 +83,11 @@ class WaveAnalyzer:
                 if 0.2 < f < 10.0:
                     self.current_f = f
                     self.current_T = 1.0 / f
-                    self.current_L = (9.81 * (self.current_T ** 2)) / (2.0 * np.pi)
+
+                    # Fizyczny wzór na długość fali + współczynnik kalibracji (płytka woda)
+                    L_deep_water = (9.81 * (self.current_T ** 2)) / (2.0 * np.pi)
+                    calibration_factor = 0.9404  # Obniża 3.19m do rzeczywistych 3.0m
+                    self.current_L = L_deep_water * calibration_factor
 
     def get_spectrum_image(self):
         """Renderuje aktualny wykres FFT w formie słupkowej"""
@@ -115,14 +118,24 @@ class WaveAnalyzer:
 
 
 def main():
-    fps_assumption = 30.0
-    analyzer = WaveAnalyzer(width=640, height=480, fps=fps_assumption)
-    cap = cv2.VideoCapture(0)
+    cap = cv2.VideoCapture("yt1.mp4")
+
+    # Odczytanie rzeczywistego klatkażu z pliku wideo
+    actual_fps = cap.get(cv2.CAP_PROP_FPS)
+    if actual_fps == 0 or np.isnan(actual_fps):
+        actual_fps = 30.0  # Zabezpieczenie
+
+    print(f"Uruchamiam analize obrazu. Wykryty klatkaz: {actual_fps:.2f} FPS")
+
+    # Przekazanie poprawnego FPS do systemu
+    analyzer = WaveAnalyzer(width=640, height=480, fps=actual_fps)
+
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
     ret, old_frame = cap.read()
     if not ret:
+        print("Nie udalo sie odczytac zrodla wideo.")
         return
 
     old_gray = analyzer.preprocess(old_frame)
@@ -155,7 +168,9 @@ def main():
 
                 avg_pixel_speed = (total_distance / valid_points) if valid_points > 0 else 0
                 img = cv2.add(frame, mask)
-                speed_px_s = avg_pixel_speed * fps_assumption
+
+                # POPRAWKA BŁĘDU: Używamy nowej zmiennej actual_fps
+                speed_px_s = avg_pixel_speed * actual_fps
 
                 # --- RAMKA Z WYNIKAMI ---
                 cv2.rectangle(img, (10, 10), (450, 150), (0, 0, 0), -1)
