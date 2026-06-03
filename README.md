@@ -10,13 +10,52 @@ System do analizy falowania wody z wideo. Zbudowany z myślą o płynnym działa
 
 ## Uruchomienie na Raspberry Pi 5
 ```bash
-Instalacja:
-   python3 -m venv venv
-   source venv/bin/activate
-   pip install opencv-python numpy scipy
-   
-Uruchomienie:
-   python main.py
+WPE – Instrukcja uruchamiania programów na Raspberry Pi
+
+Łączenie przez SSH – w terminalu (wiersz poleceń): 
+   Należy połączyć się z Internetem wykorzystując kabel Ethernet.
+   W terminalu należy wpisać: 
+   ssh użytkownik@adres_ip
+   Pojawi się konieczność wpisania hasła: twoje_hasło
+
+Tworzenie środowiska wirtualnego i pierwsze połączenie (raspberry): 
+   cd ścieżka_do_projektu_na_Pi5
+   Pomocna może być komenda ls do sprawdzenia zawartości folderu. Upewnij się, że jest plik 
+   requirements.txt
+   python3 –m venv –system-site-packages .venv
+   Powyższa komenda pozwala na korzystanie z bibliotek systemowych
+   source .venv/bin/activate
+   Po tej komendzie po lewej stronie znaku zachęty powinien pojawić się napis (.venv)
+   pip install --upgrade pip
+   pip install –r requirements.txt
+   cd src
+   python nazwa_pliku.py
+
+Kolejne połączenia (raspberry):
+   cd ścieżka_do_projektu_na_Pi5
+   source .venv/bin/activate
+   cd src
+   python nazwa_pliku.py
+
+Zakończenie połączenia (raspberry): 
+   Aby zatrzymać obecnie działający skrypt należy wcisnąć kombinację Ctrl + C
+   cd ..
+   deactivate
+   exit
+
+Usuwanie środowiska wirtualnego (raspberry): 
+   Uwaga, środowisku musi być nieaktywne. W przypadku, jeśli wcześniej uruchamiano program 
+   pythona, należy wpierw zakończyć połączenie!
+   cd ścieżka_do_projektu_na_Pi5
+   rm -rf .venv
+
+Tworzenie requirements.txt (terminal pycharm): 
+   W terminalu w np. pycharmie należy wprowadzić:
+   pip freeze > requirements.txt
+
+Wysyłanie plików przez SSH (wiersz poleceń): 
+   scp –r ścieżka_projektu_na_komputerze
+   użytkownik@adres_ip:ścieżka_do_projektu_na_Pi5
 
 Możliwa personalizacja w main.py:
    SOURCE = "ścieżka_do_filmu.mp4" – analiza nagrania.
