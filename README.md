@@ -60,3 +60,11 @@ Wysyłanie plików przez SSH (wiersz poleceń):
 Możliwa personalizacja w main.py:
    SOURCE = "ścieżka_do_filmu.mp4" – analiza nagrania.
    SOURCE = 0 – analiza obrazu z kamery na żywo.
+```
+## Autorzy
+``` bash
+   Marek Mikke
+   Mateusz Bruździak
+   Mateusz Wieczorek
+   Miłosz Dorsz
+```
