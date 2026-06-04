@@ -68,3 +68,8 @@ Możliwa personalizacja w main.py:
    Mateusz Wieczorek
    Miłosz Dorsz
 ```
+
+## Link do repozytorium
+``` bash
+https://github.com/marek-mikke-rgb/Projekt_WPE
+```
